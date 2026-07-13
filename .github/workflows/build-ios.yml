@@ -1,0 +1,80 @@
+# GitHub Actions: 在 macOS 云服务器上编译 iOS 应用
+#
+# 触发条件：
+#   1. 手动触发（在 GitHub 仓库页面点击 Actions → Build iOS IPA → Run workflow）
+#   2. 推送代码到 main 分支时自动触发
+#
+# 编译产物：
+#   生成未签名的 IPA 文件，下载后通过爱思助手签名安装到 iPhone
+
+name: Build iOS IPA
+
+on:
+  # 推送到 main 分支时自动编译
+  push:
+    branches: [ main ]
+  # 支持手动触发
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 编译 iOS 应用
+    runs-on: macos-14
+
+    steps:
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 2. 安装 XcodeGen
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      # 3. 选择 Xcode 版本
+      - name: 选择 Xcode 版本
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer || sudo xcode-select -s $(ls -d /Applications/Xcode*.app/Contents/Developer | tail -1)
+
+      # 4. 生成 Xcode 项目
+      - name: 生成 Xcode 项目
+        run: xcodegen generate
+
+      # 5. 编译应用（不签名，后续由爱思助手签名）
+      - name: 编译应用
+        run: |
+          xcodebuild build \
+            -project LivePhotoBatchConverter.xcodeproj \
+            -scheme LivePhotoBatchConverter \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath ./build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS=""
+
+      # 6. 打包 IPA
+      - name: 打包 IPA
+        run: |
+          # 创建 IPA 目录结构
+          mkdir -p Payload
+          # 复制 .app 到 Payload 目录
+          cp -r ./build/Build/Products/Release-iphoneos/LivePhotoBatchConverter.app Payload/
+          # 打包为 IPA
+          zip -r LivePhotoBatchConverter.ipa Payload
+          # 显示文件信息
+          ls -lh LivePhotoBatchConverter.ipa
+
+      # 7. 上传 IPA 构建产物
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LivePhotoBatchConverter-ipa
+          path: LivePhotoBatchConverter.ipa
+          retention-days: 30
+
+      # 8. 编译完成通知
+      - name: 编译完成
+        run: |
+          echo "✅ 编译完成！"
+          echo "📦 IPA 文件已生成，请在 Actions 页面下载"
+          echo "📱 下载后使用爱思助手签名安装到 iPhone"
