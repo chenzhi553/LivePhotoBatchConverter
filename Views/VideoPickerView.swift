@@ -6,6 +6,7 @@ import PhotosUI
 ///
 /// 应用的入口页面，用户在此：
 /// - 通过 PHPicker 选择视频
+/// - 一键全选相册中的所有视频
 /// - 查看已添加的任务列表
 /// - 启动批量转换或取消转换
 /// - 进入设置页调整参数
@@ -16,6 +17,9 @@ struct VideoPickerView: View {
 
     /// 当前激活的 sheet 类型
     @State private var activeSheet: ActiveSheet?
+
+    /// 是否正在加载相册视频
+    @State private var isLoadingAllVideos = false
 
     var body: some View {
         NavigationStack {
@@ -37,14 +41,25 @@ struct VideoPickerView: View {
                     }
                 }
 
-                // 右侧：添加视频 + 清空按钮
+                // 右侧：全选视频 + 添加视频 + 清空按钮
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    // 一键全选相册视频
+                    Button {
+                        loadAllVideos()
+                    } label: {
+                        Image(systemName: "checkmark.circle")
+                    }
+                    .disabled(viewModel.isConverting || isLoadingAllVideos)
+
+                    // 手动选择视频
                     Button {
                         activeSheet = .picker
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .disabled(viewModel.isConverting)
 
+                    // 清空列表
                     Button {
                         viewModel.clearTasks()
                     } label: {
@@ -75,6 +90,14 @@ struct VideoPickerView: View {
                     activeSheet = nil
                 }
             }
+            .overlay {
+                if isLoadingAllVideos {
+                    ProgressView("正在加载相册视频...")
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(12)
+                }
+            }
         }
     }
 
@@ -99,6 +122,10 @@ struct VideoPickerView: View {
             Text("点击右上角选择视频")
                 .font(.headline)
                 .foregroundStyle(.secondary)
+
+            Text("或点击 ✓ 一键全选相册视频")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
@@ -149,13 +176,49 @@ struct VideoPickerView: View {
                         viewModel.startConversion()
                         activeSheet = .progress
                     } label: {
-                        Text("开始转换")
+                        Text("开始转换 (\(viewModel.tasks.count) 个视频)")
                             .frame(maxWidth: .infinity)
+                            .bold()
                     }
                     .buttonStyle(.borderedProminent)
                 }
             }
             .padding()
+        }
+    }
+
+    // MARK: - 一键全选
+
+    /// 加载相册中所有视频
+    /// 使用 PHAsset.fetchAssets 查询相册中的所有视频资源
+    private func loadAllVideos() {
+        isLoadingAllVideos = true
+
+        Task {
+            // 先请求相册权限
+            let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+            guard status == .authorized || status == .limited else {
+                isLoadingAllVideos = false
+                return
+            }
+
+            // 查询相册中所有视频
+            let fetchOptions = PHFetchOptions()
+            fetchOptions.predicate = NSPredicate(format: "mediaType = %d", PHAssetMediaType.video.rawValue)
+            fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+
+            let fetchResult = PHAsset.fetchAssets(with: fetchOptions)
+
+            var assets: [PHAsset] = []
+            fetchResult.enumerateObjects { asset, _, _ in
+                assets.append(asset)
+            }
+
+            // 在主线程添加任务
+            await MainActor.run {
+                viewModel.addTasks(assets: assets)
+                isLoadingAllVideos = false
+            }
         }
     }
 }
@@ -189,9 +252,10 @@ struct PhotoPicker: UIViewControllerRepresentable {
     let onPicked: ([PHAsset]) -> Void
 
     func makeUIViewController(context: Context) -> PHPickerViewController {
-        var configuration = PHPickerConfiguration()
+        var configuration = PHPickerConfiguration(photoLibrary: .shared())
         configuration.filter = .videos          // 仅显示视频
         configuration.selectionLimit = 0        // 0 表示无限制多选
+        configuration.preferredAssetRepresentationMode = .current
         let picker = PHPickerViewController(configuration: configuration)
         picker.delegate = context.coordinator
         return picker
