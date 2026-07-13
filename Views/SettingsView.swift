@@ -85,7 +85,7 @@ struct SettingsView: View {
                         Text("1.0.0")
                             .foregroundStyle(.secondary)
                     }
-                    Text("使用说明：选择视频后点击"开始转换"，转换完成的 Live Photo 将自动保存到相册。封面图位置与视频时长可在上方设置中调整。")
+                    Text("使用说明：选择视频后点击「开始转换」，转换完成的 Live Photo 将自动保存到相册。封面图位置与视频时长可在上方设置中调整。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
