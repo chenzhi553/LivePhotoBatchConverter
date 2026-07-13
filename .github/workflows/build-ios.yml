@@ -1,7 +1,6 @@
 # GitHub Actions: 在 macOS 云服务器上编译 iOS 应用
 #
-# 使用 xcodebuild archive + exportArchive 生成标准 IPA
-# 爱思助手可直接对标准 IPA 进行免费签名安装
+# 编译后对 .app 进行 ad-hoc 签名，使爱思助手可以重签安装
 
 name: Build iOS IPA
 
@@ -16,16 +15,13 @@ jobs:
     runs-on: macos-15
 
     steps:
-      # 1. 检出代码
       - name: 检出代码
         uses: actions/checkout@v4
 
-      # 2. 安装 XcodeGen
       - name: 安装 XcodeGen
         run: brew install xcodegen
 
-      # 3. 选择 Xcode 16.x 稳定版本
-      - name: 选择 Xcode 版本
+      - name: 选择 Xcode 16.x 稳定版本
         run: |
           echo "可用 Xcode 版本:"
           ls -d /Applications/Xcode*.app
@@ -40,161 +36,79 @@ jobs:
           sudo xcode-select -s "$STABLE_XCODE/Contents/Developer"
           xcodebuild -version
 
-      # 4. 生成 Xcode 项目
       - name: 生成 Xcode 项目
         run: xcodegen generate
 
-      # 5. 创建临时自签名证书和描述文件（用于 archive）
-      - name: 创建签名资源
+      - name: 编译应用
         run: |
-          # 创建一个临时的自签名证书用于编译
-          # 这样 xcodebuild archive 可以正常工作
-          # 爱思助手之后会替换为用户的 Apple ID 签名
-
-          # 生成密钥和证书请求
-          cat > /tmp/cert-request.cnf << 'EOF'
-          [req]
-          default_bits = 2048
-          distinguished_name = req_distinguished_name
-          prompt = no
-          [req_distinguished_name]
-          CN = iOS Development
-          O = Self Signed
-          EOF
-
-          openssl req -x509 -newkey rsa:2048 -keyout /tmp/self-signed.key -out /tmp/self-signed.crt -days 365 -nodes -config /tmp/cert-request.cnf 2>/dev/null
-
-          # 导入钥匙串
-          security create-keychain -p "temp123" /tmp/temp.keychain-db 2>/dev/null || true
-          security default-keychain -s /tmp/temp.keychain-db
-          security unlock-keychain -p "temp123" /tmp/temp.keychain-db
-          security import /tmp/self-signed.key -k /tmp/temp.keychain-db -T /usr/bin/codesign -P "" 2>/dev/null || true
-          security import /tmp/self-signed.crt -k /tmp/temp.keychain-db -T /usr/bin/codesign 2>/dev/null || true
-          security set-partition-list -S apple-tool:,apple: -s -k "temp123" /tmp/temp.keychain-db 2>/dev/null || true
-
-          # 设置 codesign 身份
-          security find-identity -v
-
-      # 6. 使用 archive 方式编译（生成 .xcarchive）
-      - name: Archive 编译
-        run: |
-          xcodebuild archive \
+          xcodebuild build \
             -project LivePhotoBatchConverter.xcodeproj \
             -scheme LivePhotoBatchConverter \
             -configuration Release \
-            -archivePath ./build/LivePhotoBatchConverter.xcarchive \
             -sdk iphoneos \
+            -derivedDataPath ./build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER=""
+            CODE_SIGN_ENTITLEMENTS=""
 
-      # 7. 检查 archive 产物
-      - name: 检查 archive
+      - name: Ad-hoc 签名并打包 IPA
         run: |
-          ARCHIVE_PATH="./build/LivePhotoBatchConverter.xcarchive"
-          if [ ! -d "$ARCHIVE_PATH" ]; then
-            echo "❌ archive 未生成"
-            find ./build -type d -maxdepth 3 2>/dev/null
-            exit 1
-          fi
+          APP_PATH="./build/Build/Products/Release-iphoneos/LivePhotoBatchConverter.app"
 
-          APP_PATH="$ARCHIVE_PATH/Products/Applications/LivePhotoBatchConverter.app"
           if [ ! -d "$APP_PATH" ]; then
-            echo "❌ .app 未在 archive 中找到"
-            find "$ARCHIVE_PATH" -type d -maxdepth 4 2>/dev/null
+            echo "❌ 找不到 .app 文件"
+            find ./build -name "*.app" -type d 2>/dev/null
             exit 1
           fi
 
-          echo "=== .app 包内容 ==="
+          echo "=== 签名前 .app 内容 ==="
           ls -la "$APP_PATH"
           echo ""
-          echo "=== Info.plist ==="
-          plutil -p "$APP_PATH/Info.plist"
+
+          # Ad-hoc 签名（使用 - 表示无证书签名）
+          # 这会创建 _CodeSignature 目录，爱思助手可以替换为 Apple ID 签名
+          echo "=== 执行 ad-hoc 签名 ==="
+          codesign --force --deep --sign - "$APP_PATH" 2>&1
+          echo "签名退出码: $?"
+
+          # 验证签名
           echo ""
-          echo "✅ archive 生成成功"
+          echo "=== 验证签名 ==="
+          codesign -vvv "$APP_PATH" 2>&1 || true
+          echo ""
 
-      # 8. 创建 ExportOptions.plist 并导出 IPA
-      - name: 导出 IPA
-        run: |
-          # 创建 ExportOptions.plist
-          # 使用 development 方式导出，不需要描述文件
-          cat > /tmp/ExportOptions.plist << 'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>development</string>
-              <key>signingStyle</key>
-              <string>manual</string>
-              <key>stripSwiftSymbols</key>
-              <true/>
-              <key>teamID</key>
-              <string></string>
-              <key>uploadSymbols</key>
-              <false/>
-          </dict>
-          </plist>
-          PLIST
-
-          # 尝试用 exportArchive 导出
-          # 如果失败，回退到手动打包
-          xcodebuild -exportArchive \
-            -archivePath ./build/LivePhotoBatchConverter.xcarchive \
-            -exportOptionsPlist /tmp/ExportOptions.plist \
-            -exportPath ./build/export \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" 2>&1 || true
-
-          # 检查 exportArchive 是否成功
-          if [ -f "./build/export/LivePhotoBatchConverter.ipa" ]; then
-            echo "✅ exportArchive 成功"
-            cp ./build/export/LivePhotoBatchConverter.ipa ./LivePhotoBatchConverter.ipa
+          # 检查 _CodeSignature 是否生成
+          if [ -d "$APP_PATH/_CodeSignature" ]; then
+            echo "✅ _CodeSignature 目录已生成"
+            ls -la "$APP_PATH/_CodeSignature"
           else
-            echo "⚠️ exportArchive 失败，回退到手动打包"
-            # 手动打包（与之前方式相同，但从 archive 中提取）
-            APP_PATH="./build/LivePhotoBatchConverter.xcarchive/Products/Applications/LivePhotoBatchConverter.app"
-
-            # 创建 Payload 并打包
-            mkdir -p Payload
-            cp -r "$APP_PATH" Payload/
-
-            # 确保 Info.plist 包含所有必需字段
-            # 设置 CFBundleSupportedPlatforms
-            plutil -add CFBundleSupportedPlatforms -array Payload/LivePhotoBatchConverter.app/Info.plist 2>/dev/null || true
-            plutil -insert CFBundleSupportedPlatforms.0 -string "iPhoneOS" Payload/LivePhotoBatchConverter.app/Info.plist 2>/dev/null || true
-
-            # 设置 DTPlatformName
-            plutil -add DTPlatformName -string "iphoneos" Payload/LivePhotoBatchConverter.app/Info.plist 2>/dev/null || true
-
-            # 设置 MinimumOSVersion（确保存在）
-            plutil -add MinimumOSVersion -string "16.0" Payload/LivePhotoBatchConverter.app/Info.plist 2>/dev/null || true
-
-            # 设置 UIDeviceFamily（仅 iPhone）
-            plutil -add UIDeviceFamily -array Payload/LivePhotoBatchConverter.app/Info.plist 2>/dev/null || true
-            plutil -insert UIDeviceFamily.0 -integer 1 Payload/LivePhotoBatchConverter.app/Info.plist 2>/dev/null || true
-
-            zip -qr LivePhotoBatchConverter.ipa Payload
+            echo "❌ _CodeSignature 目录未生成，手动创建"
+            mkdir -p "$APP_PATH/_CodeSignature"
           fi
 
-          # 验证最终 IPA
+          echo ""
+          echo "=== Info.plist 内容 ==="
+          plutil -p "$APP_PATH/Info.plist"
+          echo ""
+
+          # 打包 IPA
+          echo "=== 打包 IPA ==="
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+
+          zip -qr LivePhotoBatchConverter.ipa Payload
+
           echo ""
           echo "=== IPA 文件信息 ==="
           ls -lh LivePhotoBatchConverter.ipa
           echo ""
           echo "=== IPA 内容结构 ==="
-          unzip -l LivePhotoBatchConverter.ipa | head -30
+          unzip -l LivePhotoBatchConverter.ipa
           echo ""
-          echo "=== Info.plist 最终内容 ==="
-          # 解压 Info.plist 并显示
-          unzip -p LivePhotoBatchConverter.ipa Payload/LivePhotoBatchConverter.app/Info.plist | plutil -p -
+          echo "=== _CodeSignature 内容 ==="
+          unzip -p LivePhotoBatchConverter.ipa "Payload/LivePhotoBatchConverter.app/_CodeSignature/CodeResources" 2>/dev/null | head -20 || echo "CodeResources 未找到"
 
-      # 9. 上传 IPA
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
@@ -202,9 +116,8 @@ jobs:
           path: LivePhotoBatchConverter.ipa
           retention-days: 30
 
-      # 10. 完成
       - name: 编译完成
         run: |
           echo "✅ 编译完成！"
-          echo "📦 IPA 文件已生成"
-          echo "📱 下载后使用爱思助手签名安装"
+          echo "📦 IPA 已生成（含 ad-hoc 签名）"
+          echo "📱 下载后用爱思助手签名安装"
