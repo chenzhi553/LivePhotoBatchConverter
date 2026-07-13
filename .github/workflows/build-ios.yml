@@ -30,16 +30,25 @@ jobs:
       - name: 安装 XcodeGen
         run: brew install xcodegen
 
-      # 3. 列出可用 Xcode 版本并选择最新的
+      # 3. 选择 Xcode 16.x 稳定版本（避免 beta SDK 兼容性问题）
       - name: 选择 Xcode 版本
         run: |
           echo "可用 Xcode 版本:"
           ls -d /Applications/Xcode*.app
-          # 选择最新的 Xcode
-          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
-          echo "选择: $LATEST_XCODE"
-          sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+          # 优先选择 Xcode 16.x（稳定版），避免 beta 版本
+          STABLE_XCODE=$(ls -d /Applications/Xcode_16.*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$STABLE_XCODE" ]; then
+            STABLE_XCODE=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$STABLE_XCODE" ]; then
+            echo "未找到 Xcode 16.x，使用默认 Xcode"
+            STABLE_XCODE=$(ls -d /Applications/Xcode*.app | grep -v "beta" | sort -V | tail -1)
+          fi
+          echo "选择: $STABLE_XCODE"
+          sudo xcode-select -s "$STABLE_XCODE/Contents/Developer"
           xcodebuild -version
+          echo "SDK 版本:"
+          xcodebuild -showsdks | grep iphoneos
 
       # 4. 生成 Xcode 项目
       - name: 生成 Xcode 项目
@@ -59,17 +68,51 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS=""
 
-      # 6. 打包 IPA
-      - name: 打包 IPA
+      # 6. 检查编译产物并打包 IPA
+      - name: 检查产物并打包 IPA
         run: |
-          # 创建 IPA 目录结构
+          # 检查 .app 是否存在
+          APP_PATH="./build/Build/Products/Release-iphoneos/LivePhotoBatchConverter.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "❌ 错误：找不到 .app 文件"
+            echo "构建产物目录内容:"
+            find ./build/Build/Products -type f 2>/dev/null || echo "目录不存在"
+            exit 1
+          fi
+
+          # 显示 .app 包内容
+          echo "=== .app 包内容 ==="
+          ls -la "$APP_PATH"
+          echo ""
+          echo "=== Info.plist 内容 ==="
+          plutil -p "$APP_PATH/Info.plist"
+          echo ""
+
+          # 检查必需文件
+          echo "=== 完整性检查 ==="
+          if [ -f "$APP_PATH/LivePhotoBatchConverter" ]; then
+            echo "✅ 可执行文件存在"
+          else
+            echo "❌ 可执行文件缺失"
+            exit 1
+          fi
+          if [ -f "$APP_PATH/Info.plist" ]; then
+            echo "✅ Info.plist 存在"
+          else
+            echo "❌ Info.plist 缺失"
+            exit 1
+          fi
+
+          # 打包 IPA
           mkdir -p Payload
-          # 复制 .app 到 Payload 目录
-          cp -r ./build/Build/Products/Release-iphoneos/LivePhotoBatchConverter.app Payload/
-          # 打包为 IPA
-          zip -r LivePhotoBatchConverter.ipa Payload
-          # 显示文件信息
+          cp -r "$APP_PATH" Payload/
+          zip -qr LivePhotoBatchConverter.ipa Payload
+          echo ""
+          echo "=== IPA 文件信息 ==="
           ls -lh LivePhotoBatchConverter.ipa
+          echo ""
+          echo "=== IPA 内容结构 ==="
+          unzip -l LivePhotoBatchConverter.ipa | head -20
 
       # 7. 上传 IPA 构建产物
       - name: 上传 IPA
