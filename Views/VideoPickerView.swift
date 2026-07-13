@@ -85,10 +85,8 @@ struct VideoPickerView: View {
                 }
             }
             .onChange(of: viewModel.isConverting) { converting in
-                // 转换结束后自动关闭进度页
-                if !converting, activeSheet == .progress {
-                    activeSheet = nil
-                }
+                // 转换结束后不自动关闭进度页，让用户查看结果
+                // 用户在进度页点击"完成"按钮手动关闭
             }
             .overlay {
                 if isLoadingAllVideos {

@@ -41,8 +41,6 @@ final class BatchViewModel: ObservableObject {
     func addTasks(assets: [PHAsset]) {
         guard !assets.isEmpty else { return }
 
-        let settings = self.settings
-
         for asset in assets {
             let fileName = asset.value(forKey: "filename") as? String ?? "未知视频"
             let duration = asset.duration
