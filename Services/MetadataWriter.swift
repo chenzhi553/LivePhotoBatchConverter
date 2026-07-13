@@ -182,45 +182,23 @@ final class MetadataWriter {
             }
         }
 
-        // MARK: 创建 still-image-time 定时元数据轨道
-        // AVMutableMetadataTrack 是 AVMutableCompositionTrack 的子类，
-        // 专门用于管理定时元数据组
-        guard let metadataTrack = composition.addMutableTrack(
-            withMediaType: .metadata,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) as? AVMutableMetadataTrack else {
-            throw MetadataWriterError.metadataTrackCreationFailed
-        }
-
-        // 构建 still-image-time 元数据项
-        let stillImageTimeItem = AVMutableMetadataItem()
-        stillImageTimeItem.key = "com.apple.quicktime.still-image-time" as NSString
-        stillImageTimeItem.keySpace = AVMetadataKeySpace.quickTimeMetadata
-        // 值固定为 0，表示封面帧标记
-        stillImageTimeItem.value = NSNumber(value: 0)
-        // 数据类型指定为 int8，Apple 内部约定的数据格式
-        stillImageTimeItem.dataType = "com.apple.metadata.datatype.int8"
-
-        // 构建定时元数据组
-        // timeRange.start 指定封面帧在视频中的精确时间位置
-        // duration 为一帧的时长（1/600 秒）
-        let metadataTimeRange = CMTimeRange(
-            start: stillImageTime,
-            duration: CMTime(value: 1, timescale: 600)
-        )
-        let metadataGroup = AVTimedMetadataGroup(
-            items: [stillImageTimeItem],
-            timeRange: metadataTimeRange
-        )
-        // 将定时元数据组添加到元数据轨道
-        metadataTrack.add(metadataGroup)
-
         // MARK: 构建 content identifier 电影级元数据
         // 通过 exportSession.metadata 写入到输出文件的电影级元数据中
         let identifierItem = AVMutableMetadataItem()
         identifierItem.key = AVMetadataKey.quickTimeMetadataKeyContentIdentifier as NSString
         identifierItem.keySpace = AVMetadataKeySpace.quickTimeMetadata
         identifierItem.value = identifier as NSString
+
+        // 构建 still-image-time 电影级元数据
+        // 注：理想情况下应使用定时元数据轨道（AVTimedMetadataGroup），
+        // 但 AVAssetExportSession 不支持直接写入元数据轨道。
+        // 根据实测，仅写入电影级元数据即可让系统相册识别为 Live Photo，
+        // 封面帧编辑功能会受限，但不影响基本识别和播放。
+        let stillImageTimeItem = AVMutableMetadataItem()
+        stillImageTimeItem.key = "com.apple.quicktime.still-image-time" as NSString
+        stillImageTimeItem.keySpace = AVMetadataKeySpace.quickTimeMetadata
+        stillImageTimeItem.value = NSNumber(value: 0)
+        stillImageTimeItem.dataType = "com.apple.metadata.datatype.int8"
 
         // MARK: 导出视频
         // 使用 Passthrough 模式，不重新编码视频/音频流，仅复制并添加元数据
@@ -238,8 +216,8 @@ final class MetadataWriter {
 
         exportSession.outputURL = url
         exportSession.outputFileType = .mov
-        // 设置电影级元数据（content identifier）
-        exportSession.metadata = [identifierItem]
+        // 设置电影级元数据（content identifier + still-image-time）
+        exportSession.metadata = [identifierItem, stillImageTimeItem]
 
         // 执行导出
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
