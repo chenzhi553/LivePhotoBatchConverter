@@ -41,16 +41,8 @@ struct VideoPickerView: View {
                     }
                 }
 
-                // 右侧：全选视频 + 添加视频 + 清空按钮
+                // 右侧：添加视频 + 清空按钮
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    // 一键全选相册视频
-                    Button {
-                        loadAllVideos()
-                    } label: {
-                        Image(systemName: "checkmark.circle")
-                    }
-                    .disabled(viewModel.isConverting || isLoadingAllVideos)
-
                     // 手动选择视频
                     Button {
                         activeSheet = .picker
@@ -60,33 +52,27 @@ struct VideoPickerView: View {
                     .disabled(viewModel.isConverting)
 
                     // 清空列表
-                    Button {
-                        viewModel.clearTasks()
-                    } label: {
-                        Image(systemName: "trash")
+                    if !viewModel.tasks.isEmpty && !viewModel.isConverting {
+                        Button {
+                            viewModel.clearTasks()
+                        } label: {
+                            Image(systemName: "trash")
+                        }
                     }
-                    .disabled(viewModel.tasks.isEmpty || viewModel.isConverting)
                 }
             }
             .sheet(item: $activeSheet) { sheet in
                 switch sheet {
                 case .picker:
-                    // 视频选择器
                     PhotoPicker { assets in
                         viewModel.addTasks(assets: assets)
                         activeSheet = nil
                     }
                 case .settings:
-                    // 设置页
                     SettingsView(settings: viewModel.settings)
                 case .progress:
-                    // 批量进度页
                     BatchProgressView()
                 }
-            }
-            .onChange(of: viewModel.isConverting) { converting in
-                // 转换结束后不自动关闭进度页，让用户查看结果
-                // 用户在进度页点击"完成"按钮手动关闭
             }
             .overlay {
                 if isLoadingAllVideos {
@@ -95,6 +81,16 @@ struct VideoPickerView: View {
                         .background(.ultraThinMaterial)
                         .cornerRadius(12)
                 }
+            }
+            .alert("错误", isPresented: .init(
+                get: { viewModel.errorMessage != nil },
+                set: { if !$0 { viewModel.errorMessage = nil } }
+            )) {
+                Button("确定", role: .cancel) {
+                    viewModel.errorMessage = nil
+                }
+            } message: {
+                Text(viewModel.errorMessage ?? "")
             }
         }
     }
@@ -111,25 +107,53 @@ struct VideoPickerView: View {
     }
 
     /// 空状态提示
+    /// 包含两个明显的操作按钮：一键全选 和 手动选择
     private var emptyState: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 20) {
             Image(systemName: "video.badge.plus")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
 
-            Text("点击右上角选择视频")
+            Text("选择要转换的视频")
                 .font(.headline)
                 .foregroundStyle(.secondary)
 
-            Text("或点击 ✓ 一键全选相册视频")
+            // 一键全选按钮（大号醒目按钮）
+            Button {
+                loadAllVideos()
+            } label: {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text("一键全选相册视频")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isLoadingAllVideos)
+            .padding(.horizontal, 40)
+
+            // 手动选择按钮
+            Button {
+                activeSheet = .picker
+            } label: {
+                HStack {
+                    Image(systemName: "hand.tap")
+                    Text("手动选择视频")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isLoadingAllVideos)
+            .padding(.horizontal, 40)
+
+            Text("Live Photo 将保存到系统相册")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            activeSheet = .picker
-        }
     }
 
     /// 任务列表
@@ -196,7 +220,10 @@ struct VideoPickerView: View {
             // 先请求相册权限
             let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
             guard status == .authorized || status == .limited else {
-                isLoadingAllVideos = false
+                await MainActor.run {
+                    isLoadingAllVideos = false
+                    viewModel.errorMessage = "需要相册权限才能选择视频，请在设置中允许访问"
+                }
                 return
             }
 
@@ -206,6 +233,7 @@ struct VideoPickerView: View {
             fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
 
             let fetchResult = PHAsset.fetchAssets(with: fetchOptions)
+            let count = fetchResult.count
 
             var assets: [PHAsset] = []
             fetchResult.enumerateObjects { asset, _, _ in
@@ -214,7 +242,11 @@ struct VideoPickerView: View {
 
             // 在主线程添加任务
             await MainActor.run {
-                viewModel.addTasks(assets: assets)
+                if assets.isEmpty {
+                    viewModel.errorMessage = "相册中没有找到视频"
+                } else {
+                    viewModel.addTasks(assets: assets)
+                }
                 isLoadingAllVideos = false
             }
         }

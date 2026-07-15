@@ -25,6 +25,9 @@ final class BatchViewModel: ObservableObject {
     /// 用户设置
     @Published var settings: LivePhotoSettings = LivePhotoSettings()
 
+    /// 错误提示（用于弹窗显示）
+    @Published var errorMessage: String?
+
     // MARK: - 私有属性
 
     /// 当前转换任务的 Task，用于支持取消
@@ -34,7 +37,7 @@ final class BatchViewModel: ObservableObject {
 
     /// 从 PHAsset 数组创建转换任务
     ///
-    /// 为每个 PHAsset 创建 ConversionTask，异步提取缩略图和获取视频时长。
+    /// 为每个 PHAsset 创建 ConversionTask，异步提取缩略图。
     /// 不会阻塞主线程。
     ///
     /// - Parameter assets: 用户选择的 PHAsset 数组
@@ -42,7 +45,8 @@ final class BatchViewModel: ObservableObject {
         guard !assets.isEmpty else { return }
 
         for asset in assets {
-            let fileName = asset.value(forKey: "filename") as? String ?? "未知视频"
+            // 安全获取文件名：避免 KVC 崩溃
+            let fileName = safeGetFileName(from: asset)
             let duration = asset.duration
 
             let task = ConversionTask(
@@ -57,12 +61,34 @@ final class BatchViewModel: ObservableObject {
         }
     }
 
+    /// 安全获取视频文件名
+    /// 不使用 KVC（value(forKey:)），避免 ObjC 异常崩溃
+    private func safeGetFileName(from asset: PHAsset) -> String {
+        // PHAssetResource 可以安全获取文件名
+        let resources = PHAssetResource.assetResources(for: asset)
+        if let resource = resources.first {
+            let originalFilename = resource.originalFilename
+            if !originalFilename.isEmpty {
+                return originalFilename
+            }
+        }
+        // 回退：使用 localIdentifier 的一部分
+        return "视频_\(asset.localIdentifier.prefix(8))"
+    }
+
     /// 异步加载视频缩略图
+    ///
+    /// **关键修复**：使用 `.highQualityFormat` 交付模式确保回调只触发一次。
+    /// 之前的 `.opportunistic` 模式会多次回调，导致 CheckedContinuation
+    /// 被 resume 多次而崩溃。
     private func loadThumbnail(for taskId: UUID, asset: PHAsset) {
         Task.detached { [weak self] in
             let options = PHImageRequestOptions()
-            options.deliveryMode = .opportunistic
+            // ✅ 修复：使用 highQualityFormat 确保只回调一次
+            options.deliveryMode = .highQualityFormat
+            options.isSynchronous = false
             options.isNetworkAccessAllowed = true
+            options.resizeMode = .fast
 
             let image = await withCheckedContinuation { (continuation: CheckedContinuation<UIImage?, Never>) in
                 PHImageManager.default().requestImage(
@@ -126,27 +152,23 @@ final class BatchViewModel: ObservableObject {
                 if Task.isCancelled { break }
 
                 // 标记为处理中
-                await MainActor.run {
-                    self?.updateTask(id: taskId) { task in
-                        task.status = .processing
-                        task.progress = 0.0
-                        task.errorMessage = nil
-                    }
+                self?.updateTask(id: taskId) { task in
+                    task.status = .processing
+                    task.progress = 0.0
+                    task.errorMessage = nil
                 }
 
                 // 获取当前任务
-                let task: ConversionTask? = await MainActor.run {
-                    self?.tasks.first { $0.id == taskId }
+                guard let currentTask = self?.tasks.first(where: { $0.id == taskId }) else {
+                    completedCount += 1
+                    continue
                 }
-                guard let currentTask = task else { continue }
 
                 // 获取 PHAsset
                 guard let asset = self?.fetchPHAsset(withIdentifier: currentTask.assetIdentifier) else {
-                    await MainActor.run {
-                        self?.updateTask(id: taskId) { t in
-                            t.status = .failed("找不到相册资源")
-                            t.errorMessage = "找不到相册资源"
-                        }
+                    self?.updateTask(id: taskId) { t in
+                        t.status = .failed("找不到相册资源")
+                        t.errorMessage = "找不到相册资源"
                     }
                     completedCount += 1
                     continue
@@ -154,11 +176,9 @@ final class BatchViewModel: ObservableObject {
 
                 // 获取视频文件 URL
                 guard let videoURL = await self?.requestVideoURL(from: asset) else {
-                    await MainActor.run {
-                        self?.updateTask(id: taskId) { t in
-                            t.status = .failed("无法获取视频文件")
-                            t.errorMessage = "无法获取视频文件"
-                        }
+                    self?.updateTask(id: taskId) { t in
+                        t.status = .failed("无法获取视频文件")
+                        t.errorMessage = "无法获取视频文件"
                     }
                     completedCount += 1
                     continue
@@ -170,41 +190,31 @@ final class BatchViewModel: ObservableObject {
                         videoURL: videoURL,
                         settings: settings
                     ) { progress in
-                        Task { @MainActor in
-                            self?.updateTask(id: taskId) { t in
-                                t.progress = progress
-                            }
+                        self?.updateTask(id: taskId) { t in
+                            t.progress = progress
                         }
                     }
 
                     // 转换成功
-                    await MainActor.run {
-                        self?.updateTask(id: taskId) { t in
-                            t.status = .completed
-                            t.progress = 1.0
-                        }
+                    self?.updateTask(id: taskId) { t in
+                        t.status = .completed
+                        t.progress = 1.0
                     }
                 } catch {
                     // 转换失败
-                    await MainActor.run {
-                        self?.updateTask(id: taskId) { t in
-                            t.status = .failed(error.localizedDescription)
-                            t.errorMessage = error.localizedDescription
-                        }
+                    self?.updateTask(id: taskId) { t in
+                        t.status = .failed(error.localizedDescription)
+                        t.errorMessage = error.localizedDescription
                     }
                 }
 
                 completedCount += 1
-                await MainActor.run {
-                    self?.overallProgress = Double(completedCount) / Double(totalCount)
-                }
+                self?.overallProgress = Double(completedCount) / Double(totalCount)
             }
 
             // 转换完成
-            await MainActor.run {
-                self?.isConverting = false
-                self?.sendCompletionNotification()
-            }
+            self?.isConverting = false
+            self?.sendCompletionNotification()
         }
     }
 
@@ -236,24 +246,29 @@ final class BatchViewModel: ObservableObject {
 
     /// 从 PHAsset 获取视频文件 URL
     ///
-    /// 使用 PHAssetResourceManager 将视频导出到临时目录。
-    /// 对于 iCloud 视频，会触发下载。
+    /// 双重保障：
+    /// 1. 先用 PHImageManager.requestAVAsset 直接获取（本地视频）
+    /// 2. 失败则用 PHAssetResourceManager 导出到临时文件（iCloud 视频）
     private func requestVideoURL(from asset: PHAsset) async -> URL? {
-        // 优先尝试直接获取 URL（适用于已下载的本地视频）
+        // 方案 1：直接获取 URL（本地视频）
         if let url = await getVideoURLDirect(from: asset) {
             return url
         }
 
-        // 回退方案：使用 PHAssetResourceManager 导出到临时文件
+        // 方案 2：导出到临时文件（iCloud 视频或编辑过的视频）
         return await exportVideoToTemp(from: asset)
     }
 
     /// 直接获取视频 URL
     private func getVideoURLDirect(from asset: PHAsset) async -> URL? {
         await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+            let options = PHVideoRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.deliveryMode = .highQualityFormat
+
             PHImageManager.default().requestAVAsset(
                 forVideo: asset,
-                options: nil
+                options: options
             ) { avAsset, _, _ in
                 if let urlAsset = avAsset as? AVURLAsset {
                     continuation.resume(returning: urlAsset.url)
